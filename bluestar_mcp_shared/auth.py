@@ -97,13 +97,36 @@ class OktaMiddleware:
         await self.app(scope, receive, send)
 
 
+class PassthroughMiddleware:
+    """
+    Checks that an Authorization or X-Forwarded-Authorization header is
+    present, without validating its contents. No token/signature checks.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            headers = dict(scope.get("headers", []))
+            has_auth = b"authorization" in headers or b"x-forwarded-authorization" in headers
+            if not has_auth:
+                response = Response("Unauthorized — Authorization header required", status_code=401)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 def get_auth_middleware() -> type:
     """
     Returns the appropriate middleware class based on AUTH_MODE env var.
     AUTH_MODE=internal_token (default) → InternalTokenMiddleware
     AUTH_MODE=okta → OktaMiddleware
+    AUTH_MODE=passthrough → PassthroughMiddleware
     """
     mode = os.environ.get("AUTH_MODE", "internal_token")
     if mode == "okta":
         return OktaMiddleware
+    if mode == "passthrough":
+        return PassthroughMiddleware
     return InternalTokenMiddleware
