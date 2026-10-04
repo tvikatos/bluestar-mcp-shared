@@ -7,7 +7,9 @@ Shared authentication middleware for Bluestar MCP servers.
 Controlled by `AUTH_MODE` environment variable:
 
 - `internal_token` (default) — validates `X-Internal-Token` header. Used for personal GCP / development with Cloudflare.
-- `okta` — validates Okta Bearer JWT token. Used for Ciena GCP / production with API Gateway.
+- `passthrough` — requires an `Authorization` (or `X-Forwarded-Authorization`) header but does not validate it. Used for Ciena GCP / production, where API Gateway validates the Entra ID JWT.
+
+Any other value raises `ValueError` at startup.
 
 ## Usage
 
@@ -22,7 +24,5 @@ http_app.add_middleware(middleware)
 
 | Variable | Mode | Description |
 |---|---|---|
-| `AUTH_MODE` | both | `internal_token` or `okta` |
+| `AUTH_MODE` | both | `internal_token` or `passthrough` |
 | `INTERNAL_TOKEN` | internal_token | shared secret for dev auth |
-| `OKTA_ISSUER` | okta | Okta issuer URL |
-| `OKTA_AUDIENCE` | okta | Okta client ID |
