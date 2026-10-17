@@ -104,7 +104,8 @@ With `idempotent=False`, a transient error is retried only if it arrived before 
 
 ```python
 from bluestar_mcp_shared.property_types import (
-    PROPERTY_TYPES, coerce_and_check_property_types, json_default, stored_value_type_mismatch,
+    PROPERTY_TYPES, coerce_and_check_property_types, json_default, parse_default_value,
+    stored_value_type_mismatch,
 )
 
 error = coerce_and_check_property_types(properties, prop_defs)   # writes: coerces in place
@@ -127,6 +128,7 @@ json.dumps(rows, default=json_default)                          # tool output
 
 - `coerce_and_check_property_types(properties, prop_defs)` checks incoming values and replaces them in place: an `int` on `FLOAT` becomes a `float`, and a `DATE`/`DATETIME` string becomes a Python `date` / an aware UTC `datetime`, which the Neo4j driver writes as a native temporal. It returns the first error, e.g. `Property 'fromDate' expects DATE (YYYY-MM-DD), got str ('12/10/26')`, or `None`. `None` values, properties with no PropertyDef and unrecognised types are skipped. It can run twice over the same dict: already converted values (Python or `neo4j.time` dates and aware datetimes) are accepted, so defaults can be merged in and re-checked.
 - Date input is strict. A regex gate runs before `fromisoformat`, which on Python 3.12 would also accept `20261012`, `2026-W42-6`, a space separator and datetimes with no offset. A datetime with no offset is rejected, not assumed to be UTC. `bool` and numbers are never accepted as dates.
+- `parse_default_value(declared_type, text, prop_name="default_value")` turns a `PropertyDef.default_value` (a string in Ontology-db) into its declared type and returns `(value, None)` or `(None, error)`, with the same error format as above. It's strict: `INTEGER` from an optionally signed run of digits (`"5"`), `FLOAT` from a plain decimal (`"0.0"`, `"5"`, `"1e3"`, never `nan`/`inf`), `BOOLEAN` from exactly `"true"`/`"false"`, `DATE`/`DATETIME` through the strict parsers, and `STRING` unchanged. A non-string default goes through the normal write check. The servers use it when applying defaults, and validate_ontology uses it to check every `default_value`.
 - `stored_value_type_mismatch(declared_type, value)` is for values read back from Neo4j (validate_graph). `DATE`/`DATETIME` use the same acceptance rule as writes, minus strings: a date (Python or `neo4j.time`, not a datetime) on `DATE`, an aware datetime on `DATETIME`. A string is a mismatch, which is how legacy string dates show up; so is a naive datetime or a `LocalDateTime`. An `int` on `FLOAT` is a mismatch too.
 - `json_default` is for `json.dumps(default=...)`: dates become `YYYY-MM-DD` and datetimes `YYYY-MM-DDThh:mm:ss[.ffffff]Z` in UTC (Neo4j nanoseconds truncated to microseconds); anything else becomes `str(value)`.
 

@@ -8,6 +8,7 @@ from bluestar_mcp_shared.property_types import (
     PROPERTY_TYPES,
     coerce_and_check_property_types,
     json_default,
+    parse_default_value,
     parse_strict_date,
     parse_strict_datetime,
     stored_value_type_mismatch,
@@ -259,3 +260,52 @@ def test_json_default_falls_back_to_str():
 def test_json_default_with_json_dumps():
     row = {"fromDate": neo4j.time.Date(2026, 1, 2), "at": neo4j.time.DateTime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)}
     assert json.dumps(row, default=json_default) == '{"fromDate": "2026-01-02", "at": "2026-01-02T03:04:05Z"}'
+
+
+# ---- parse_default_value ----
+
+@pytest.mark.parametrize("declared_type, text, expected", [
+    ("STRING", "Medium", "Medium"),
+    ("STRING", "", ""),
+    ("INTEGER", "5", 5),
+    ("INTEGER", "-12", -12),
+    ("FLOAT", "0.0", 0.0),
+    ("FLOAT", "5", 5.0),
+    ("FLOAT", "1.5e3", 1500.0),
+    ("FLOAT", ".5", 0.5),
+    ("BOOLEAN", "true", True),
+    ("BOOLEAN", "false", False),
+    ("DATE", "2026-01-01", date(2026, 1, 1)),
+    ("DATETIME", "2026-01-01T09:00:00+02:00", datetime(2026, 1, 1, 7, 0, tzinfo=UTC)),
+    ("SOMETHING_ELSE", "anything", "anything"),
+])
+def test_parse_default_value_accepts(declared_type, text, expected):
+    value, error = parse_default_value(declared_type, text)
+    assert error is None
+    assert value == expected and type(value) is type(expected)
+
+
+@pytest.mark.parametrize("declared_type, text", [
+    ("INTEGER", "0.0"), ("INTEGER", "5 "), ("INTEGER", "five"), ("INTEGER", ""),
+    ("FLOAT", "nan"), ("FLOAT", "inf"), ("FLOAT", "1e999"), ("FLOAT", "0,5"), ("FLOAT", ""),
+    ("BOOLEAN", "True"), ("BOOLEAN", "1"), ("BOOLEAN", "yes"),
+    ("DATE", "12/10/26"), ("DATE", "2026-02-30"),
+    ("DATETIME", "2026-01-01T09:00:00"),
+])
+def test_parse_default_value_rejects(declared_type, text):
+    value, error = parse_default_value(declared_type, text, prop_name="budget")
+    assert value is None
+    assert error.startswith(f"Property 'budget' expects {declared_type}")
+    assert f"got str ('{text}')" in error
+
+
+def test_parse_default_value_message_matches_the_input_check():
+    _, error = parse_default_value("DATE", "12/10/26", prop_name="fromDate")
+    assert error == "Property 'fromDate' expects DATE (YYYY-MM-DD), got str ('12/10/26')"
+
+
+def test_parse_default_value_non_string_goes_through_the_input_check():
+    assert parse_default_value("FLOAT", 3) == (3.0, None)
+    assert parse_default_value("BOOLEAN", True) == (True, None)
+    value, error = parse_default_value("INTEGER", True)
+    assert value is None and "expects INTEGER" in error

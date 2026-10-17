@@ -8,9 +8,11 @@ values the same way.
 - coerce_and_check_property_types: incoming values (writes). Coerces in place
   (int -> float for FLOAT, strict ISO-8601 string -> date/datetime for
   DATE/DATETIME, which the Neo4j driver then stores as native temporals)
+- parse_default_value: a PropertyDef.default_value string as its declared type
 - stored_value_type_mismatch: values read back from Neo4j (validate_graph)
 - json_default: json.dumps(default=...) for tool output, temporals as ISO
 """
+import math
 import re
 from datetime import date, datetime, timezone
 
@@ -131,6 +133,52 @@ def coerce_and_check_property_types(properties: dict, prop_defs: dict) -> str | 
         elif _basic_type_mismatch(declared_type, value):
             return _type_error(prop_name, declared_type, value)
     return None
+
+
+_INTEGER_TEXT_RE = re.compile(r"[+-]?[0-9]+")
+_FLOAT_TEXT_RE = re.compile(r"[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?")
+
+
+def _parse_float_text(text: str) -> float | None:
+    if not _FLOAT_TEXT_RE.fullmatch(text):
+        return None
+    value = float(text)
+    return value if math.isfinite(value) else None  # "1e999" overflows to inf
+
+
+_TEXT_PARSERS = {
+    "INTEGER": lambda text: int(text) if _INTEGER_TEXT_RE.fullmatch(text) else None,
+    "FLOAT": _parse_float_text,
+    "BOOLEAN": lambda text: {"true": True, "false": False}.get(text),
+    "DATE": parse_strict_date,
+    "DATETIME": parse_strict_datetime,
+}
+
+
+def parse_default_value(declared_type: str, text, prop_name: str = "default_value") -> tuple[object, str | None]:
+    """
+    A PropertyDef.default_value (stored as a string in Ontology-db) as a value
+    of its declared type: returns (value, None), or (None, error) in the same
+    format as coerce_and_check_property_types.
+
+    Strict: INTEGER from an optionally signed run of digits ("5"), FLOAT from
+    a plain decimal ("0.0", "5", "1e3"; never "nan"/"inf"), BOOLEAN from
+    exactly "true"/"false", DATE/DATETIME through the strict ISO parsers, and
+    STRING unchanged. A default that isn't a string goes through the normal
+    input check, so one already of the right type is accepted. Unrecognised
+    types are returned unchanged, as elsewhere.
+    """
+    if not isinstance(text, str):
+        properties = {prop_name: text}
+        error = coerce_and_check_property_types(properties, {prop_name: {"type": declared_type}})
+        return (None, error) if error else (properties[prop_name], None)
+    parser = _TEXT_PARSERS.get(declared_type)
+    if parser is None:
+        return text, None
+    value = parser(text)
+    if value is None:
+        return None, _type_error(prop_name, declared_type, text)
+    return value, None
 
 
 def stored_value_type_mismatch(declared_type: str, value) -> bool:
