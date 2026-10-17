@@ -1,6 +1,6 @@
 # bluestar-mcp-shared
 
-Shared authentication middleware for Bluestar MCP servers.
+Shared code for Bluestar MCP servers: auth middleware, Neo4j drivers and retry, and PropertyDef type checking.
 
 ## Auth modes
 
@@ -97,6 +97,40 @@ await with_retry(write_tx, idempotent=False)
 ```
 
 With `idempotent=False`, a transient error is retried only if it arrived before `mark_commit_started()` was called (connection dropped on `begin`/`run`, nothing committed). From that call on the error is re-raised without a retry and logged at WARNING: the write may or may not have been applied, and the caller has to check. If `fn` never calls `mark_commit_started()`, `idempotent=False` gives no protection.
+
+## Property types
+
+`bluestar_mcp_shared.property_types` is the only implementation of Ontology-db `PropertyDef.type` rules. mcp-BP-KG and mcp-kg-manager both call it, so they reject and convert the same values the same way.
+
+```python
+from bluestar_mcp_shared.property_types import (
+    PROPERTY_TYPES, coerce_and_check_property_types, json_default, stored_value_type_mismatch,
+)
+
+error = coerce_and_check_property_types(properties, prop_defs)   # writes: coerces in place
+if error:
+    return f"Validation failed: {error}"
+
+json.dumps(rows, default=json_default)                          # tool output
+```
+
+`PROPERTY_TYPES` is `STRING`, `BOOLEAN`, `INTEGER`, `FLOAT`, `DATE`, `DATETIME`.
+
+| Type | Accepted on write | Stored as |
+|---|---|---|
+| `STRING` | `str` | string |
+| `BOOLEAN` | `bool` | boolean |
+| `INTEGER` | `int`, not `bool` | integer |
+| `FLOAT` | `float`; an `int` is converted to `float` | float |
+| `DATE` | exactly `YYYY-MM-DD`, a real calendar day | Neo4j `Date` |
+| `DATETIME` | `YYYY-MM-DDThh:mm:ss`, optional 1–6 digit fraction, then `Z` or `±hh:mm` (mandatory) | Neo4j `DateTime`, in UTC |
+
+- `coerce_and_check_property_types(properties, prop_defs)` checks incoming values and replaces them in place: an `int` on `FLOAT` becomes a `float`, and a `DATE`/`DATETIME` string becomes a Python `date` / an aware UTC `datetime`, which the Neo4j driver writes as a native temporal. It returns the first error, e.g. `Property 'fromDate' expects DATE (YYYY-MM-DD), got str ('12/10/26')`, or `None`. `None` values, properties with no PropertyDef and unrecognised types are skipped. It can run twice over the same dict: already converted values (Python or `neo4j.time` dates and aware datetimes) are accepted, so defaults can be merged in and re-checked.
+- Date input is strict. A regex gate runs before `fromisoformat`, which on Python 3.12 would also accept `20261012`, `2026-W42-6`, a space separator and datetimes with no offset. A datetime with no offset is rejected, not assumed to be UTC. `bool` and numbers are never accepted as dates.
+- `stored_value_type_mismatch(declared_type, value)` is for values read back from Neo4j (validate_graph). `DATE`/`DATETIME` use the same acceptance rule as writes, minus strings: a date (Python or `neo4j.time`, not a datetime) on `DATE`, an aware datetime on `DATETIME`. A string is a mismatch, which is how legacy string dates show up; so is a naive datetime or a `LocalDateTime`. An `int` on `FLOAT` is a mismatch too.
+- `json_default` is for `json.dumps(default=...)`: dates become `YYYY-MM-DD` and datetimes `YYYY-MM-DDThh:mm:ss[.ffffff]Z` in UTC (Neo4j nanoseconds truncated to microseconds); anything else becomes `str(value)`.
+
+A `DATE`/`DATETIME` property compared in Cypher needs a temporal on both sides: `r.fromDate >= date($from)`, not `r.fromDate >= $from`.
 
 ## Environment variables
 
