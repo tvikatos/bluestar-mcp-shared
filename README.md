@@ -1,6 +1,6 @@
 # bluestar-mcp-shared
 
-Shared code for Bluestar MCP servers: auth middleware, Neo4j drivers and retry, and PropertyDef type checking.
+Shared code for Bluestar MCP servers: auth middleware, Neo4j drivers and retry, PropertyDef type checking, and RelationshipType definitions.
 
 ## Auth modes
 
@@ -133,6 +133,40 @@ json.dumps(rows, default=json_default)                          # tool output
 - `json_default` is for `json.dumps(default=...)`: dates become `YYYY-MM-DD` and datetimes `YYYY-MM-DDThh:mm:ss[.ffffff]Z` in UTC (Neo4j nanoseconds truncated to microseconds); anything else becomes `str(value)`.
 
 A `DATE`/`DATETIME` property compared in Cypher needs a temporal on both sides: `r.fromDate >= date($from)`, not `r.fromDate >= $from`.
+
+## RelationshipType definitions
+
+`bluestar_mcp_shared.ontology` is the single source of truth for reading a RelationshipType from the Ontology-db. A RelationshipType is one node with any number of `FROM` and `TO` edges to NodeTypes, so its endpoints are sets, never a single label. Both servers load RelationshipTypes through this module.
+
+```python
+from bluestar_mcp_shared.ontology import (
+    RELATIONSHIP_TYPES_SUBQUERY, format_types, load_relationship_type,
+    load_relationship_types, shape_relationship_types,
+)
+
+rel_types = await load_relationship_types(ontology_driver, ontology_database, "BP_Operations")
+rel_types["HAS_RAID"]["from_types"]   # {"Project", "Action", "Risk"}
+```
+
+Each definition has this shape:
+
+| Key | Value |
+|---|---|
+| `name` | the RelationshipType name |
+| `cardinality` | `"ONE"`, `"MANY"` or `None` |
+| `required` | `bool` |
+| `global_required` | `bool`: `(:Ontology)-[:HAS_RELATIONSHIP]->(rt)` |
+| `from_types` | `set[str]`: every `(rt)-[:FROM]->(:NodeType)` |
+| `to_types` | `set[str]`: every `(rt)-[:TO]->(:NodeType)` |
+| `properties` | `{name: {name, type, required, enum_values}}` |
+
+- `load_relationship_types(driver, database, ontology_name)` returns every RelationshipType the Ontology `CONTAINS`, as `{name: definition}` (`{}` for an unknown ontology). `load_relationship_type(..., name)` returns one, or `None`. Both are reads and retry on a dropped connection.
+- `RELATIONSHIP_TYPES_SUBQUERY` is the Cypher behind them: a `CALL` subquery that needs the Ontology bound as `o` and returns `rel_types`. Embed it in a larger query (such as a server's ontology bundle query) to keep one round trip, then pass `rel_types` to `shape_relationship_types`. `FROM`, `TO` and `HAS_PROPERTY` are collected in separate subqueries; matching them together gives one row per FROM × TO pairing.
+- Each definition is a `RelationshipType`, a plain `dict` with the endpoint rule as two methods. A relationship is valid if its source label is in `from_types` and its target label is in `to_types`; each end is checked on its own, with no FROM/TO pairings.
+  - `allows_from(label)`: an empty `from_types` allows any source, since an ontology-level (`HAS_RELATIONSHIP`) type needs no `FROM` edge.
+  - `allows_to(label)`: an empty `to_types` allows no target, since a RelationshipType with no `TO` edge is a broken definition (validate_ontology reports it).
+- `format_types(types)` renders a set for error messages, sorted: `Action, Project, Risk`.
+- `serializable(rel_type)` converts the sets to sorted lists for JSON output. Convert at that boundary; the definitions themselves keep sets.
 
 ## Environment variables
 
