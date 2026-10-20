@@ -6,9 +6,12 @@ from neo4j.exceptions import ServiceUnavailable
 from bluestar_mcp_shared import neo4j as neo4j_module
 from bluestar_mcp_shared import ontology
 from bluestar_mcp_shared.ontology import (
+    REBAC_SYSTEM_PROPAGATE,
     RELATIONSHIP_TYPES_SUBQUERY,
     RelationshipType,
+    build_rebac_filters,
     format_types,
+    load_all_relationship_types,
     load_relationship_type,
     load_relationship_types,
     serializable,
@@ -97,6 +100,8 @@ def test_shape_fields():
             "fromDate": {"name": "fromDate", "type": "DATE", "required": False, "enum_values": None},
             "toDate": {"name": "toDate", "type": "DATE", "required": False, "enum_values": None},
         },
+        "rebac_out": "propagate",
+        "rebac_in": "none",
     }
 
 
@@ -206,3 +211,104 @@ def test_serializable_sorts_the_sets_without_changing_the_definition():
     assert out["to_types"] == ["Action", "Risk"]
     assert json.loads(json.dumps(out))["name"] == "HAS_RAID"
     assert has_raid["from_types"] == {"Project", "Action", "Risk"}
+
+
+# ---- Task 119: ReBAC per-direction modes ----
+
+SYSTEM = "_CREATED>|_UPDATED>|IS_SAME_PERSON>|IN_DOMAIN>|HAS_CHUNK>|HAS_EXTRACTED_ENTITY>"
+
+
+def rt(name, rebac_out=None, rebac_in=None):
+    return shape_relationship_types([{"name": name, "rebac_out": rebac_out, "rebac_in": rebac_in}])[name]
+
+
+def test_rebac_modes_default_to_todays_outgoing_walk():
+    has_raid = shape_relationship_types(ROWS)["HAS_RAID"]
+    assert (has_raid["rebac_out"], has_raid["rebac_in"]) == ("propagate", "none")
+    assert (rt("X")["rebac_out"], rt("X")["rebac_in"]) == ("propagate", "none")
+
+
+def test_rebac_modes_are_read_from_the_row():
+    row = {"name": "HAS_RAID", "rebac_out": "propagate", "rebac_in": "reference"}
+    has_raid = shape_relationship_types([row])["HAS_RAID"]
+    assert (has_raid["rebac_out"], has_raid["rebac_in"]) == ("propagate", "reference")
+
+
+def test_subquery_reads_the_rebac_properties():
+    assert "rebac_out: rt.rebac_out" in RELATIONSHIP_TYPES_SUBQUERY
+    assert "rebac_in: rt.rebac_in" in RELATIONSHIP_TYPES_SUBQUERY
+
+
+def test_filters_with_defaults_are_every_type_outgoing():
+    propagate, reference = build_rebac_filters([rt("OWNS"), rt("HAS_RAID")])
+    assert propagate == SYSTEM + "|HAS_RAID>|OWNS>"
+    assert reference == ""
+
+
+def test_filters_mix_of_modes_in_both_directions():
+    rel_types = [
+        rt("HAS_RAID", "propagate", "reference"),
+        rt("RELATES_TO", "reference", "none"),
+        rt("IS_PM_OF", "propagate", "none"),
+        rt("PEER_OF", "propagate", "propagate"),
+        rt("CITES", "reference", "reference"),
+        rt("BACK_ONLY", "none", "propagate"),
+        rt("HIDDEN", "none", "none"),
+    ]
+    propagate, reference = build_rebac_filters(rel_types)
+    assert propagate == SYSTEM + "|<BACK_ONLY|HAS_RAID>|IS_PM_OF>|PEER_OF"
+    assert reference == "CITES|<HAS_RAID|RELATES_TO>"
+
+
+def test_filters_are_sorted_and_accept_a_dict():
+    rel_types = {name: rt(name) for name in ("ZETA", "ALPHA", "MID")}
+    assert build_rebac_filters(rel_types)[0] == SYSTEM + "|ALPHA>|MID>|ZETA>"
+
+
+def test_system_types_lead_the_propagate_filter():
+    propagate, _ = build_rebac_filters([])
+    assert propagate == "|".join(REBAC_SYSTEM_PROPAGATE) == SYSTEM
+    assert ">" != propagate and not propagate.endswith("|>")
+
+
+def test_has_state_and_system_types_are_never_taken_from_the_ontology():
+    rel_types = [rt("HAS_STATE", "propagate", "propagate"), rt("_CREATED", "reference", "reference"),
+                 rt("IN_DOMAIN", "none", "propagate"), rt("OWNS")]
+    propagate, reference = build_rebac_filters(rel_types)
+    assert "HAS_STATE" not in propagate and "HAS_STATE" not in reference
+    assert propagate == SYSTEM + "|OWNS>"
+    assert reference == ""
+
+
+def test_unknown_mode_counts_as_none():
+    propagate, reference = build_rebac_filters([rt("ODD", "everything", "Propagate")])
+    assert propagate == SYSTEM
+    assert reference == ""
+
+
+def test_same_name_in_two_ontologies_takes_the_strongest_mode():
+    propagate, reference = build_rebac_filters([rt("LINK", "reference", "none"), rt("LINK", "propagate", "reference")])
+    assert propagate == SYSTEM + "|LINK>"
+    assert reference == "<LINK"
+
+
+def test_load_all_relationship_types():
+    class Result:
+        async def data(self):
+            return [{"ontology": "BP_Operations", "rel_types": ROWS}, {"ontology": "Empty", "rel_types": []}]
+
+    class Session(FakeSession):
+        async def run(self, query, **params):
+            self.driver.calls.append((query, params))
+            return Result()
+
+    class Driver(FakeDriver):
+        def session(self, database=None):
+            return Session(self)
+
+    driver = Driver(None)
+    loaded = asyncio.run(load_all_relationship_types(driver, "neo4j"))
+    assert set(loaded) == {"BP_Operations", "Empty"}
+    assert loaded["BP_Operations"]["HAS_RAID"]["from_types"] == {"Project", "Action", "Risk"}
+    assert loaded["Empty"] == {}
+    assert driver.calls[0][0].startswith("MATCH (o:Ontology)CALL") or "MATCH (o:Ontology)" in driver.calls[0][0]

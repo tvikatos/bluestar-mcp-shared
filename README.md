@@ -159,6 +159,8 @@ Each definition has this shape:
 | `from_types` | `set[str]`: every `(rt)-[:FROM]->(:NodeType)` |
 | `to_types` | `set[str]`: every `(rt)-[:TO]->(:NodeType)` |
 | `properties` | `{name: {name, type, required, enum_values}}` |
+| `rebac_out` | `"propagate"`, `"reference"` or `"none"` (default `"propagate"`) |
+| `rebac_in` | `"propagate"`, `"reference"` or `"none"` (default `"none"`) |
 
 - `load_relationship_types(driver, database, ontology_name)` returns every RelationshipType the Ontology `CONTAINS`, as `{name: definition}` (`{}` for an unknown ontology). `load_relationship_type(..., name)` returns one, or `None`. Both are reads and retry on a dropped connection.
 - `RELATIONSHIP_TYPES_SUBQUERY` is the Cypher behind them: a `CALL` subquery that needs the Ontology bound as `o` and returns `rel_types`. Embed it in a larger query (such as a server's ontology bundle query) to keep one round trip, then pass `rel_types` to `shape_relationship_types`. `FROM`, `TO` and `HAS_PROPERTY` are collected in separate subqueries; matching them together gives one row per FROM × TO pairing.
@@ -167,6 +169,19 @@ Each definition has this shape:
   - `allows_to(label)`: an empty `to_types` allows no target, since a RelationshipType with no `TO` edge is a broken definition (validate_ontology reports it).
 - `format_types(types)` renders a set for error messages, sorted: `Action, Project, Risk`.
 - `serializable(rel_type)` converts the sets to sorted lists for JSON output. Convert at that boundary; the definitions themselves keep sets.
+
+### ReBAC scope filters
+
+`rebac_out` / `rebac_in` say how ReBAC's scope walk crosses a relationship of the type, per graph direction (out: FROM → TO, in: TO → FROM): `propagate` puts the node reached in full scope and continues from it; `reference` puts it in read-only scope and stops there; `none` never crosses. A missing property means the default; the defaults reproduce the old single outgoing walk.
+
+`build_rebac_filters(rel_types)` returns `(propagate_filter, reference_filter)`, the APOC `relationshipFilter` strings for the two walks:
+
+- every type listed explicitly, sorted by name, as `TYPE>` (out), `<TYPE` (in) or `TYPE` (both) — never a bare `>`;
+- the propagate filter starts with the fixed system types `_CREATED>|_UPDATED>|IS_SAME_PERSON>|IN_DOMAIN>|HAS_CHUNK>|HAS_EXTRACTED_ENTITY>`; `HAS_STATE` is never included, and the system types are never taken from the ontology;
+- a name defined in several Ontologies takes the strongest mode of any definition per direction; a value outside the three modes counts as `none`;
+- the reference filter is `""` when nothing references. An empty filter means every type to APOC, so skip that walk instead of passing `""`.
+
+`load_all_relationship_types(driver, database)` loads every Ontology's RelationshipTypes as `{ontology: {name: definition}}`, for callers such as ReBAC that need all of them.
 
 ## Environment variables
 
