@@ -70,7 +70,11 @@ CALL {
 """
 
 _LOAD_QUERY = "MATCH (o:Ontology {name: $ontology_name})" + RELATIONSHIP_TYPES_SUBQUERY + "RETURN rel_types"
-_LOAD_ALL_QUERY = "MATCH (o:Ontology)" + RELATIONSHIP_TYPES_SUBQUERY + "RETURN o.name AS ontology, rel_types"
+_LOAD_ALL_QUERY = (
+    "/* load_all_relationship_types */ MATCH (ontology:Ontology) WITH ontology AS o"
+    + RELATIONSHIP_TYPES_SUBQUERY
+    + "RETURN o.name AS ontology, rel_types"
+)
 
 # Task 119 — how ReBAC's scope walk crosses a relationship of this type, per
 # graph direction (out: FROM -> TO, in: TO -> FROM):

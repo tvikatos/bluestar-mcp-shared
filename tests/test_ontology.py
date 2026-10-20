@@ -311,4 +311,5 @@ def test_load_all_relationship_types():
     assert set(loaded) == {"BP_Operations", "Empty"}
     assert loaded["BP_Operations"]["HAS_RAID"]["from_types"] == {"Project", "Action", "Risk"}
     assert loaded["Empty"] == {}
-    assert driver.calls[0][0].startswith("MATCH (o:Ontology)CALL") or "MATCH (o:Ontology)" in driver.calls[0][0]
+    assert driver.calls[0][0].startswith("/* load_all_relationship_types */")
+    assert RELATIONSHIP_TYPES_SUBQUERY in driver.calls[0][0]
