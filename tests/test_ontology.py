@@ -280,16 +280,28 @@ def test_has_state_and_system_types_are_never_taken_from_the_ontology():
     assert reference == ""
 
 
-def test_unknown_mode_counts_as_none():
-    propagate, reference = build_rebac_filters([rt("ODD", "everything", "Propagate")])
+def test_unknown_mode_counts_as_none_and_warns(caplog):
+    with caplog.at_level("WARNING", logger="bluestar_mcp_shared.ontology"):
+        propagate, reference = build_rebac_filters([rt("ODD", "everything", "reference")])
     assert propagate == SYSTEM
+    assert reference == "<ODD"
+    assert "RelationshipType 'ODD' has rebac_out = 'everything'" in caplog.text
+
+
+def test_same_name_in_two_ontologies_is_never_walked_and_warns(caplog):
+    with caplog.at_level("WARNING", logger="bluestar_mcp_shared.ontology"):
+        propagate, reference = build_rebac_filters(
+            [rt("LINK", "propagate", "none"), rt("OWNS"), rt("LINK", "propagate", "reference")]
+        )
+    assert propagate == SYSTEM + "|OWNS>"
     assert reference == ""
+    assert "RelationshipType 'LINK' is defined in more than one Ontology" in caplog.text
 
 
-def test_same_name_in_two_ontologies_takes_the_strongest_mode():
-    propagate, reference = build_rebac_filters([rt("LINK", "reference", "none"), rt("LINK", "propagate", "reference")])
-    assert propagate == SYSTEM + "|LINK>"
-    assert reference == "<LINK"
+def test_valid_definitions_log_nothing(caplog):
+    with caplog.at_level("WARNING", logger="bluestar_mcp_shared.ontology"):
+        build_rebac_filters([rt("HAS_RAID", "propagate", "reference"), rt("OWNS")])
+    assert caplog.records == []
 
 
 def test_load_all_relationship_types():

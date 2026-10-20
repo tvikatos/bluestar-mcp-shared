@@ -29,7 +29,11 @@ can read just the first FROM or TO it finds.
 - build_rebac_filters: the APOC relationship filters for ReBAC's two-tier
   scope walk (Task 119), the one place they are built
 """
+import logging
+
 from .neo4j import with_retry
+
+logger = logging.getLogger(__name__)
 
 # FROM, TO and HAS_PROPERTY are collected in separate subqueries: matching
 # them together multiplies the rows (one per FROM x TO pairing), which is
@@ -190,9 +194,6 @@ def format_types(types) -> str:
     return ", ".join(sorted(types))
 
 
-_REBAC_STRENGTH = {"none": 0, "reference": 1, "propagate": 2}
-
-
 def _rebac_mode(value) -> str:
     """A rebac_out/rebac_in value; anything outside REBAC_MODES counts as none (fail closed)."""
     return value if value in REBAC_MODES else "none"
@@ -207,9 +208,12 @@ def build_rebac_filters(rel_types) -> tuple[str, str]:
     Each type is listed explicitly, sorted by name, in APOC's [<]TYPE[>]
     syntax: out only -> TYPE>, in only -> <TYPE, both -> TYPE. Never a bare
     '>'. The propagate filter starts with REBAC_SYSTEM_PROPAGATE; HAS_STATE
-    and the system types are never taken from the ontology. A name defined in
-    several Ontologies gets the strongest mode of any definition, per
-    direction (propagate > reference > none).
+    and the system types are never taken from the ontology.
+
+    Fail closed: a value outside REBAC_MODES counts as none, and a name
+    defined in more than one Ontology (names are unique across the
+    Ontology-db; validate_ontology reports a duplicate) is never walked —
+    both are logged as warnings.
 
     The reference filter is "" when no type references in either direction.
     An empty relationshipFilter means EVERY type to APOC, so callers must skip
@@ -218,17 +222,28 @@ def build_rebac_filters(rel_types) -> tuple[str, str]:
     if isinstance(rel_types, dict):
         rel_types = rel_types.values()
     modes: dict[str, list[str]] = {}
+    duplicates: set[str] = set()
     for rt in rel_types:
         name = rt["name"]
         if name in REBAC_EXCLUDED_TYPES:
             continue
-        out_mode = _rebac_mode(rt.get("rebac_out", REBAC_OUT_DEFAULT))
-        in_mode = _rebac_mode(rt.get("rebac_in", REBAC_IN_DEFAULT))
-        current = modes.setdefault(name, ["none", "none"])
-        if _REBAC_STRENGTH[out_mode] > _REBAC_STRENGTH[current[0]]:
-            current[0] = out_mode
-        if _REBAC_STRENGTH[in_mode] > _REBAC_STRENGTH[current[1]]:
-            current[1] = in_mode
+        if name in modes:
+            duplicates.add(name)
+            continue
+        out_mode, in_mode = rt.get("rebac_out", REBAC_OUT_DEFAULT), rt.get("rebac_in", REBAC_IN_DEFAULT)
+        for prop, value in (("rebac_out", out_mode), ("rebac_in", in_mode)):
+            if value not in REBAC_MODES:
+                logger.warning(
+                    "RelationshipType '%s' has %s = %r, not one of %s — ReBAC treats it as none",
+                    name, prop, value, ", ".join(REBAC_MODES),
+                )
+        modes[name] = [_rebac_mode(out_mode), _rebac_mode(in_mode)]
+    for name in sorted(duplicates):
+        logger.warning(
+            "RelationshipType '%s' is defined in more than one Ontology — ReBAC never walks it "
+            "until the duplicate is removed", name,
+        )
+        modes[name] = ["none", "none"]
 
     def entries(tier: str) -> list[str]:
         out = []

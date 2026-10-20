@@ -178,7 +178,7 @@ Each definition has this shape:
 
 - every type listed explicitly, sorted by name, as `TYPE>` (out), `<TYPE` (in) or `TYPE` (both) — never a bare `>`;
 - the propagate filter starts with the fixed system types `_CREATED>|_UPDATED>|IS_SAME_PERSON>|IN_DOMAIN>|HAS_CHUNK>|HAS_EXTRACTED_ENTITY>`; `HAS_STATE` is never included, and the system types are never taken from the ontology;
-- a name defined in several Ontologies takes the strongest mode of any definition per direction; a value outside the three modes counts as `none`;
+- fail closed, with a warning logged: a value outside the three modes counts as `none`, and a name defined in more than one Ontology (names are unique across the Ontology-db) is never walked;
 - the reference filter is `""` when nothing references. An empty filter means every type to APOC, so skip that walk instead of passing `""`.
 
 `load_all_relationship_types(driver, database)` loads every Ontology's RelationshipTypes as `{ontology: {name: definition}}`, for callers such as ReBAC that need all of them.
