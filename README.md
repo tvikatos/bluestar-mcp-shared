@@ -1,6 +1,6 @@
 # bluestar-mcp-shared
 
-Shared code for Bluestar MCP servers: auth middleware, Neo4j drivers and retry, PropertyDef type checking, and RelationshipType definitions.
+Shared code for Bluestar MCP servers: auth middleware, Neo4j drivers and retry, PropertyDef type checking, RelationshipType definitions, and ReBAC scope computation.
 
 ## Auth modes
 
@@ -182,6 +182,29 @@ Each definition has this shape:
 - the reference filter is `""` when nothing references. An empty filter means every type to APOC, so skip that walk instead of passing `""`.
 
 `load_all_relationship_types(driver, database)` loads every Ontology's RelationshipTypes as `{ontology: {name: definition}}`, for callers such as ReBAC that need all of them.
+
+## ReBAC scope computation
+
+`bluestar_mcp_shared.rebac` is the one implementation of the two-tier ReBAC scope walk (Task 119). mcp-BP-KG uses it to enforce scope; mcp-kg-manager's `explain_scope` uses it to audit, so the audit reports exactly what is enforced.
+
+```python
+from bluestar_mcp_shared.rebac import compute_scope, load_label_key_map, reference_depth_from_env
+
+scope = await compute_scope(session, ("Project", "P-A"), rel_types, key_map,
+                            reference_depth=reference_depth_from_env())
+scope.full, scope.readonly      # {label: set(keys)}
+scope.visible, scope.writable   # both tiers / full only
+scope.filters                   # (propagate_filter, reference_filter) actually used
+scope.warnings                  # failed-closed definitions, types no Ontology defines
+```
+
+- The start is any KG node, given as `(label, key)`; its key property comes from `key_map` (`load_label_key_map`), or `email` for a `BS_user`. An inactive `BS_user`, or a start node the session can't see, gives an empty scope.
+- **Propagate walk** (`apoc.path.subgraphNodes`, `minLevel: 1`, no `maxLevel`) over the propagate filter: full scope. **Reference hop** from the start and every full-scope node over the reference filter, `maxLevel: reference_depth`: read-only scope. A node reached both ways is full. The reference walk is left out when nothing references.
+- Filters and fail-closed rules come from `bluestar_mcp_shared.ontology` (`resolve_rebac_modes`, `rebac_filters_from_modes`). Its warnings are returned rather than logged, together with relationship types the KG holds that no Ontology defines (from `db.relationshipTypes()`, which never fails the walk).
+- The walk runs on the caller's `session`, so the role's RBAC bounds it: a type or label it can't TRAVERSE is a wall, and a node whose key it can't READ comes back with a null key and isn't collected. System labels (`SYSTEM_LABELS`) are never collected.
+- `reference_depth_from_env()` reads `REBAC_REFERENCE_DEPTH` (default 1) and raises unless it is an integer ≥ 1.
+
+`bluestar_mcp_shared.ontology` also exposes `resolve_rebac_modes(rel_types) -> ({name: (out, in)}, warnings)` and `rebac_filters_from_modes(modes)`. `build_rebac_filters` is unchanged: it combines the two and logs the warnings.
 
 ## Environment variables
 
