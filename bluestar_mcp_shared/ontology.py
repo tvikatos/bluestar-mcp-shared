@@ -199,30 +199,23 @@ def _rebac_mode(value) -> str:
     return value if value in REBAC_MODES else "none"
 
 
-def build_rebac_filters(rel_types) -> tuple[str, str]:
+def resolve_rebac_modes(rel_types) -> tuple[dict[str, tuple[str, str]], list[str]]:
     """
-    (propagate_filter, reference_filter): APOC relationshipFilter strings for
-    ReBAC's two scope walks, from RelationshipType definitions (an iterable,
-    or a {name: definition} dict).
-
-    Each type is listed explicitly, sorted by name, in APOC's [<]TYPE[>]
-    syntax: out only -> TYPE>, in only -> <TYPE, both -> TYPE. Never a bare
-    '>'. The propagate filter starts with REBAC_SYSTEM_PROPAGATE; HAS_STATE
-    and the system types are never taken from the ontology.
+    ({name: (out_mode, in_mode)}, warnings) for RelationshipType definitions
+    (an iterable, or a {name: definition} dict): the mode ReBAC actually uses
+    for each ontology type, per direction. HAS_STATE and the system types are
+    skipped (they are fixed in code, see REBAC_SYSTEM_PROPAGATE).
 
     Fail closed: a value outside REBAC_MODES counts as none, and a name
     defined in more than one Ontology (names are unique across the
-    Ontology-db; validate_ontology reports a duplicate) is never walked —
-    both are logged as warnings.
-
-    The reference filter is "" when no type references in either direction.
-    An empty relationshipFilter means EVERY type to APOC, so callers must skip
-    the reference walk then, never pass "".
+    Ontology-db; validate_ontology reports a duplicate) is never walked. Each
+    case adds a warning; nothing is logged here.
     """
     if isinstance(rel_types, dict):
         rel_types = rel_types.values()
-    modes: dict[str, list[str]] = {}
+    modes: dict[str, tuple[str, str]] = {}
     duplicates: set[str] = set()
+    warnings: list[str] = []
     for rt in rel_types:
         name = rt["name"]
         if name in REBAC_EXCLUDED_TYPES:
@@ -233,18 +226,22 @@ def build_rebac_filters(rel_types) -> tuple[str, str]:
         out_mode, in_mode = rt.get("rebac_out", REBAC_OUT_DEFAULT), rt.get("rebac_in", REBAC_IN_DEFAULT)
         for prop, value in (("rebac_out", out_mode), ("rebac_in", in_mode)):
             if value not in REBAC_MODES:
-                logger.warning(
-                    "RelationshipType '%s' has %s = %r, not one of %s — ReBAC treats it as none",
-                    name, prop, value, ", ".join(REBAC_MODES),
+                warnings.append(
+                    f"RelationshipType '{name}' has {prop} = {value!r}, not one of "
+                    f"{', '.join(REBAC_MODES)} — ReBAC treats it as none"
                 )
-        modes[name] = [_rebac_mode(out_mode), _rebac_mode(in_mode)]
+        modes[name] = (_rebac_mode(out_mode), _rebac_mode(in_mode))
     for name in sorted(duplicates):
-        logger.warning(
-            "RelationshipType '%s' is defined in more than one Ontology — ReBAC never walks it "
-            "until the duplicate is removed", name,
+        warnings.append(
+            f"RelationshipType '{name}' is defined in more than one Ontology — ReBAC never walks it "
+            f"until the duplicate is removed"
         )
-        modes[name] = ["none", "none"]
+        modes[name] = ("none", "none")
+    return modes, warnings
 
+
+def rebac_filters_from_modes(modes: dict[str, tuple[str, str]]) -> tuple[str, str]:
+    """(propagate_filter, reference_filter) for the modes resolve_rebac_modes returns."""
     def entries(tier: str) -> list[str]:
         out = []
         for name in sorted(modes):
@@ -260,3 +257,25 @@ def build_rebac_filters(rel_types) -> tuple[str, str]:
     propagate = "|".join([*REBAC_SYSTEM_PROPAGATE, *entries("propagate")])
     reference = "|".join(entries("reference"))
     return propagate, reference
+
+
+def build_rebac_filters(rel_types) -> tuple[str, str]:
+    """
+    (propagate_filter, reference_filter): APOC relationshipFilter strings for
+    ReBAC's two scope walks, from RelationshipType definitions (an iterable,
+    or a {name: definition} dict).
+
+    Each type is listed explicitly, sorted by name, in APOC's [<]TYPE[>]
+    syntax: out only -> TYPE>, in only -> <TYPE, both -> TYPE. Never a bare
+    '>'. The propagate filter starts with REBAC_SYSTEM_PROPAGATE; HAS_STATE
+    and the system types are never taken from the ontology. The rules for
+    each type's mode are resolve_rebac_modes'; its warnings are logged.
+
+    The reference filter is "" when no type references in either direction.
+    An empty relationshipFilter means EVERY type to APOC, so callers must skip
+    the reference walk then, never pass "".
+    """
+    modes, warnings = resolve_rebac_modes(rel_types)
+    for warning in warnings:
+        logger.warning(warning)
+    return rebac_filters_from_modes(modes)

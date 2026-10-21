@@ -7,4 +7,4 @@ __all__ = [
     "PassthroughMiddleware",
     "get_auth_middleware",
 ]
-__version__ = "0.7.0"
+__version__ = "0.8.0"

@@ -1,7 +1,7 @@
 [project]
 name = "bluestar-mcp-shared"
-version = "0.7.0"
-description = "Shared code for Bluestar MCP servers: auth middleware, Neo4j drivers and retry, PropertyDef type checking, RelationshipType definitions"
+version = "0.8.0"
+description = "Shared code for Bluestar MCP servers: auth middleware, Neo4j drivers and retry, PropertyDef type checking, RelationshipType definitions, ReBAC scope computation"
 requires-python = ">=3.12"
 dependencies = [
     "starlette>=0.40.0",
