@@ -11,6 +11,8 @@ values the same way.
 - parse_default_value: a PropertyDef.default_value string as its declared type
 - stored_value_type_mismatch: values read back from Neo4j (validate_graph)
 - json_default: json.dumps(default=...) for tool output, temporals as ISO
+- resolve_required_defaults: the parsed default_values a node's missing
+  required properties get, or why it can't be written
 """
 import math
 import re
@@ -179,6 +181,45 @@ def parse_default_value(declared_type: str, text, prop_name: str = "default_valu
     if value is None:
         return None, _type_error(prop_name, declared_type, text)
     return value, None
+
+
+def resolve_required_defaults(
+    prop_defs: dict, provided: dict, *, skip=frozenset()
+) -> tuple[dict | None, str | None, list[str]]:
+    """
+    (defaults, error, missing_without_default) for the required properties of
+    a node about to be written: every PropertyDef in prop_defs that is
+    required, not in `provided` (the caller's values win) and not in `skip`
+    (names the caller handles itself, e.g. a generated key being minted, or
+    properties already set on an existing node).
+
+    - Each one with a default_value gets it parsed as its declared type
+      (parse_default_value), so it is written as a FLOAT/DATE/... like any
+      caller value: (defaults, None, []).
+    - The first problem in prop_defs order decides the outcome, as the
+      validators' own loop always did:
+      - a default_value that doesn't parse: (None, "<error> — from its
+        default_value", []);
+      - a required property with no default_value: (None, None, [every
+        required property with no default_value, in prop_defs order]).
+    """
+    defaults: dict = {}
+    for prop_name, prop_def in prop_defs.items():
+        if not prop_def.get("required") or prop_name in provided or prop_name in skip:
+            continue
+        default_value = prop_def.get("default_value")
+        if default_value is None:
+            missing = [
+                name for name, pd in prop_defs.items()
+                if pd.get("required") and name not in provided and name not in skip
+                and pd.get("default_value") is None
+            ]
+            return None, None, missing
+        value, error = parse_default_value(prop_def.get("type"), default_value, prop_name)
+        if error:
+            return None, f"{error} — from its default_value", []
+        defaults[prop_name] = value
+    return defaults, None, []
 
 
 def stored_value_type_mismatch(declared_type: str, value) -> bool:

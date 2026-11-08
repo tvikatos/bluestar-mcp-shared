@@ -11,6 +11,7 @@ from bluestar_mcp_shared.property_types import (
     parse_default_value,
     parse_strict_date,
     parse_strict_datetime,
+    resolve_required_defaults,
     stored_value_type_mismatch,
 )
 
@@ -309,3 +310,55 @@ def test_parse_default_value_non_string_goes_through_the_input_check():
     assert parse_default_value("BOOLEAN", True) == (True, None)
     value, error = parse_default_value("INTEGER", True)
     assert value is None and "expects INTEGER" in error
+
+
+# ---- resolve_required_defaults ----
+
+def pd(type_, required=True, default_value=None):
+    return {"type": type_, "required": required, "default_value": default_value}
+
+
+def test_defaults_are_parsed_as_their_type():
+    prop_defs = {"budget": pd("FLOAT", default_value="0.0"), "start": pd("DATE", default_value="2026-01-01"),
+                 "count": pd("INTEGER", default_value="5"), "done": pd("BOOLEAN", default_value="false"),
+                 "note": pd("STRING", default_value="n/a")}
+    defaults, error, missing = resolve_required_defaults(prop_defs, {})
+    assert (error, missing) == (None, [])
+    assert defaults == {"budget": 0.0, "start": date(2026, 1, 1), "count": 5, "done": False, "note": "n/a"}
+    assert type(defaults["budget"]) is float and type(defaults["start"]) is date
+
+
+def test_caller_value_wins_and_optional_properties_are_ignored():
+    prop_defs = {"budget": pd("FLOAT", default_value="0.0"), "note": pd("STRING", required=False, default_value="x")}
+    assert resolve_required_defaults(prop_defs, {"budget": 12.5}) == ({}, None, [])
+
+
+def test_skip_is_respected():
+    prop_defs = {"id": pd("STRING"), "title": pd("STRING", default_value="untitled")}
+    assert resolve_required_defaults(prop_defs, {}, skip={"id"}) == ({"title": "untitled"}, None, [])
+    assert resolve_required_defaults(prop_defs, {}, skip={"id", "title"}) == ({}, None, [])
+
+
+def test_bad_default_is_an_error_with_the_suffix():
+    prop_defs = {"budget": pd("FLOAT", default_value="abc")}
+    assert resolve_required_defaults(prop_defs, {}) == (
+        None, "Property 'budget' expects FLOAT, got str ('abc') — from its default_value", [],
+    )
+
+
+def test_missing_without_default_lists_every_one():
+    prop_defs = {"title": pd("STRING"), "budget": pd("FLOAT", default_value="0.0"), "owner": pd("STRING"),
+                 "given": pd("STRING")}
+    assert resolve_required_defaults(prop_defs, {"given": "g"}) == (None, None, ["title", "owner"])
+
+
+def test_first_problem_in_prop_defs_order_decides():
+    missing_first = {"title": pd("STRING"), "budget": pd("FLOAT", default_value="abc")}
+    assert resolve_required_defaults(missing_first, {}) == (None, None, ["title"])
+    bad_first = {"budget": pd("FLOAT", default_value="abc"), "title": pd("STRING")}
+    assert resolve_required_defaults(bad_first, {})[1].endswith("— from its default_value")
+
+
+def test_nothing_required():
+    assert resolve_required_defaults({"note": pd("STRING", required=False)}, {}) == ({}, None, [])
+    assert resolve_required_defaults({}, {}) == ({}, None, [])
