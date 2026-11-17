@@ -325,3 +325,141 @@ def test_load_all_relationship_types():
     assert loaded["Empty"] == {}
     assert driver.calls[0][0].startswith("/* load_all_relationship_types */")
     assert RELATIONSHIP_TYPES_SUBQUERY in driver.calls[0][0]
+
+
+# ---- Task 136: ExternalDataType ----
+
+from datetime import datetime, timezone  # noqa: E402
+
+from bluestar_mcp_shared.ontology import (  # noqa: E402
+    EXTERNAL_DATA_PROP_DEFS,
+    EXTERNAL_DATA_TYPES_QUERY,
+    check_external_data_properties,
+    external_data_bundle,
+    external_data_url_error,
+    is_collection,
+    is_collection_of,
+    load_external_data_types,
+    shape_external_data_types,
+)
+
+EDT_ROWS = [
+    {"name": "RiskRegister", "description": "A risk register sheet", "policy": "Read as the user",
+     "collection_of": ["Risk"]},
+    {"name": "IssueLog", "description": None, "policy": None, "collection_of": ["Issue", "Action", None]},
+]
+EDTS = shape_external_data_types(EDT_ROWS)
+
+# BP_Operations (dev, 2026-11-17)
+BP_ROWS = [
+    {"name": "OWNS_RAID", "from_types": ["Stakeholder"], "to_types": ["Action", "Risk"], "rebac_out": "propagate"},
+    {"name": "HAS_RISK_CATEGORY", "from_types": ["Risk"], "to_types": ["RiskCategory"], "required": True,
+     "rebac_out": "reference"},
+    {"name": "HAS_RAID", "from_types": ["Project", "Action", "Risk", "Task", "Requirement", "Outcome"],
+     "to_types": ["Action", "Risk"]},
+    {"name": "REGISTER_FOR", "from_types": ["RiskRegister"], "to_types": ["Project"]},
+]
+BP = shape_relationship_types(BP_ROWS)
+
+
+def test_external_data_types_shape():
+    assert EDTS["RiskRegister"] == {"name": "RiskRegister", "description": "A risk register sheet",
+                                    "policy": "Read as the user", "collection_of": {"Risk"}}
+    assert EDTS["IssueLog"]["collection_of"] == {"Issue", "Action"}
+    assert shape_external_data_types(None) == {}
+
+
+def test_external_data_types_query_and_loader():
+    assert "MATCH (et:ExternalDataType)" in EXTERNAL_DATA_TYPES_QUERY
+    assert "[:IS_COLLECTION_OF]->(nt:NodeType)" in EXTERNAL_DATA_TYPES_QUERY
+
+    class Result:
+        async def data(self):
+            return EDT_ROWS
+
+    class Session(FakeSession):
+        async def run(self, query, **params):
+            self.driver.calls.append((query, params))
+            return Result()
+
+    class Driver(FakeDriver):
+        def session(self, database=None):
+            return Session(self)
+
+    driver = Driver(None)
+    assert asyncio.run(load_external_data_types(driver, "neo4j")) == EDTS
+    assert driver.calls[0][0] == EXTERNAL_DATA_TYPES_QUERY
+
+
+def test_is_collection_of():
+    assert is_collection("RiskRegister", EDTS)
+    assert not is_collection("Risk", EDTS)
+    assert not is_collection("RiskRegister", None)
+    assert is_collection_of("RiskRegister", "Risk", EDTS)
+    assert not is_collection_of("RiskRegister", "Action", EDTS)
+    assert not is_collection_of("Risk", "Risk", EDTS)
+
+
+def test_collections_inherit_relationship_endpoints():
+    # (Stakeholder)-[:OWNS_RAID]->(RiskRegister), (RiskRegister)-[:HAS_RISK_CATEGORY]->(RiskCategory)
+    assert BP["OWNS_RAID"].allows_to("RiskRegister", EDTS)
+    assert BP["HAS_RISK_CATEGORY"].allows_from("RiskRegister", EDTS)
+    assert BP["HAS_RAID"].allows_from("RiskRegister", EDTS) and BP["HAS_RAID"].allows_to("RiskRegister", EDTS)
+    # only for the types it collects
+    assert not BP["HAS_RISK_CATEGORY"].allows_to("RiskRegister", EDTS)
+    assert BP["OWNS_RAID"].allows_to("IssueLog", EDTS)          # collects Action
+    assert not BP["HAS_RISK_CATEGORY"].allows_from("IssueLog", EDTS)
+
+
+def test_without_external_data_types_the_rule_is_unchanged():
+    assert not BP["OWNS_RAID"].allows_to("RiskRegister")
+    assert BP["OWNS_RAID"].allows_to("Risk")
+    assert BP["HAS_RAID"].allows_from("Project", EDTS)
+
+
+def test_an_external_data_type_can_be_a_declared_endpoint():
+    assert BP["REGISTER_FOR"].allows_from("RiskRegister", EDTS)
+    assert BP["REGISTER_FOR"].allows_to("Project", EDTS)
+    assert "WHERE f:NodeType OR f:ExternalDataType" in RELATIONSHIP_TYPES_SUBQUERY
+    assert "WHERE t:NodeType OR t:ExternalDataType" in RELATIONSHIP_TYPES_SUBQUERY
+
+
+def test_built_in_prop_defs():
+    assert set(EXTERNAL_DATA_PROP_DEFS) == {"id", "url", "description", "read_rules", "last_scanned_at"}
+    assert EXTERNAL_DATA_PROP_DEFS["id"]["is_key"] and EXTERNAL_DATA_PROP_DEFS["id"]["generated"]
+    assert EXTERNAL_DATA_PROP_DEFS["url"]["required"]
+    assert not EXTERNAL_DATA_PROP_DEFS["description"]["required"]
+    assert EXTERNAL_DATA_PROP_DEFS["last_scanned_at"]["type"] == "DATETIME"
+
+
+@pytest.mark.parametrize("url", ["https://app.smartsheet.com/sheets/abc", "http://host/x",
+                                 "HTTPS://contoso.sharepoint.com/:x:/r/sites/a/b.xlsx"])
+def test_url_accepted(url):
+    assert external_data_url_error("url", url) is None
+
+
+@pytest.mark.parametrize("url", ["ftp://host/x", "app.smartsheet.com/sheets/abc", "https://", "", 5, None])
+def test_url_rejected(url):
+    assert external_data_url_error("url", url) == (
+        f"Property 'url' must be an http(s) URL, got {type(url).__name__} ('{url}')"
+    )
+
+
+def test_check_external_data_properties():
+    props = {"url": "https://app.smartsheet.com/sheets/abc", "last_scanned_at": "2026-11-17T09:30:00+01:00",
+             "read_rules": "Ignore rows marked Closed"}
+    assert check_external_data_properties(props) is None
+    assert props["last_scanned_at"] == datetime(2026, 11, 17, 8, 30, tzinfo=timezone.utc)
+    assert check_external_data_properties({"url": "smartsheet"}).startswith("Property 'url' must be an http(s) URL")
+    assert check_external_data_properties({"last_scanned_at": "yesterday"}).startswith(
+        "Property 'last_scanned_at' expects DATETIME")
+    assert check_external_data_properties({"description": 3}) == "Property 'description' expects STRING, got int ('3')"
+
+
+def test_external_data_bundle():
+    bundle = external_data_bundle(EDTS["RiskRegister"], BP)
+    assert bundle["node_type_exists"] and bundle["is_external_data_type"]
+    assert (bundle["key_prop"], bundle["generated_key"], bundle["lifecycle_id"]) == ("id", True, None)
+    assert bundle["prop_defs"] == EXTERNAL_DATA_PROP_DEFS and bundle["prop_defs"] is not EXTERNAL_DATA_PROP_DEFS
+    assert bundle["rel_types"] is BP
+    assert bundle["external_data_type"]["collection_of"] == {"Risk"}

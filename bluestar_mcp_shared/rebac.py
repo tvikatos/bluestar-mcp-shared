@@ -238,7 +238,8 @@ async def compute_scope(session, start: tuple[str, object], rel_types, key_map: 
 
 
 # {label: key_prop} for every NodeType with an is_key HAS_PROPERTY, plus 'id'
-# for every TextType and DocType; the reserved system label Chunk is added in
+# for every TextType, DocType and ExternalDataType (Task 136: their instances
+# are scoped like any node); the reserved system label Chunk is added in
 # code ('id' too), since it is never modelled in the Ontology-db.
 LABEL_KEY_MAP_QUERY = """
 MATCH (nt:NodeType)-[r:HAS_PROPERTY]->(pd:PropertyDef) WHERE r.is_key = true
@@ -249,6 +250,9 @@ RETURN tt.name AS label, 'id' AS key_prop
 UNION
 MATCH (dt:DocType)
 RETURN dt.name AS label, 'id' AS key_prop
+UNION
+MATCH (et:ExternalDataType)
+RETURN et.name AS label, 'id' AS key_prop
 """
 
 
