@@ -171,6 +171,23 @@ Each definition has this shape:
 - `format_types(types)` renders a set for error messages, sorted: `Action, Project, Risk`.
 - `serializable(rel_type)` converts the sets to sorted lists for JSON output. Convert at that boundary; the definitions themselves keep sets.
 
+### ExternalDataType (Task 136)
+
+An `ExternalDataType` (e.g. `RiskRegister`) is a pointer to a user's own sheet: the KG keeps a node holding its URL and semantics, and the agent reads the sheet live through its own connectors (the servers never call Smartsheet or Graph). Like a DocType it is a standalone Ontology-db definition, not contained by an Ontology, and never instantiated itself; KG instances carry its name as their label.
+
+- `load_external_data_types(driver, database)` returns `{name: {name, description, policy, collection_of: set[str]}}` from `(:ExternalDataType)-[:IS_COLLECTION_OF]->(:NodeType)`.
+- **Collections inherit relationship endpoints.** An instance may stand at either end of any RelationshipType that has a collected NodeType at that end. `RelationshipType.allows_from(label, external_data_types)` / `allows_to(label, external_data_types)` accept a collection of an allowed type; without `external_data_types` they behave as before. `is_collection_of(label, node_type, external_data_types)` is the single rule behind them, and every endpoint check should go through them.
+- **Cardinality and `required` don't apply to collection instances.** `is_collection(label, external_data_types)` is the test; the ReBAC modes are the relationship type's own, unchanged.
+- RelationshipType `FROM` / `TO` may point at an ExternalDataType (e.g. `REGISTER_FOR` FROM `RiskRegister` TO `Project`): the RelationshipType loader collects both NodeType and ExternalDataType endpoints.
+- **Built-in instance properties** (no per-type PropertyDefs in v1), as `EXTERNAL_DATA_PROP_DEFS` in bundle shape:
+  - `id`: the key, generated;
+  - `url`: STRING, required, any http(s) URL;
+  - `description`, `read_rules`: STRING, optional;
+  - `last_scanned_at`: DATETIME, optional.
+
+  `check_external_data_properties(properties)` checks types (coercing in place) and the URL. `external_data_bundle(edt, rel_types)` gives a server an ontology-bundle-shaped definition for an ExternalDataType label.
+- **Scope:** `LABEL_KEY_MAP_QUERY` maps every ExternalDataType to `id`, so instances are scoped like any node, in both tiers.
+
 ### ReBAC scope filters
 
 `rebac_out` / `rebac_in` say how ReBAC's scope walk crosses a relationship of the type, per graph direction (out: FROM → TO, in: TO → FROM): `propagate` puts the node reached in full scope and continues from it; `reference` puts it in read-only scope and stops there; `none` never crosses. A missing property means the default; the defaults reproduce the old single outgoing walk.

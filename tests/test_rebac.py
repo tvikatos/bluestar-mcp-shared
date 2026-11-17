@@ -9,6 +9,7 @@ way apoc.path.subgraphNodes does, driven by the relationshipFilter strings
 compute_scope builds.
 """
 import asyncio
+import sys
 
 import pytest
 
@@ -57,7 +58,8 @@ def parse_filter(relationship_filter: str) -> set:
     return allowed
 
 
-def walk(starts, relationship_filter, max_level=None, edges=EDGES):
+def walk(starts, relationship_filter, max_level=None, edges=None):
+    edges = EDGES if edges is None else edges
     allowed = parse_filter(relationship_filter)
     visited, frontier, reached, level = set(starts), list(starts), [], 0
     while frontier and (max_level is None or level < max_level):
@@ -269,3 +271,29 @@ def test_reference_depth_from_env_rejects(monkeypatch, value):
     monkeypatch.setenv("REBAC_REFERENCE_DEPTH", value)
     with pytest.raises(ValueError, match="Invalid REBAC_REFERENCE_DEPTH"):
         rebac.reference_depth_from_env()
+
+
+# ---- Task 136: ExternalDataType instances are scoped like any node ----
+
+def test_label_key_map_query_includes_external_data_types():
+    assert "MATCH (et:ExternalDataType)" in rebac.LABEL_KEY_MAP_QUERY
+    assert "RETURN et.name AS label, 'id' AS key_prop" in rebac.LABEL_KEY_MAP_QUERY
+
+
+def test_external_data_instances_are_collected_into_scope(monkeypatch):
+    # (Stakeholder)-[:OWNS_RAID]->(RiskRegister): the walk follows OWNS_RAID by
+    # name, so the register lands in full scope, keyed by id.
+    nodes = dict(NODES, **{
+        "u-st": (["BS_user"], {"email": "st@example.com", "is_active": True}),
+        "st": (["Stakeholder"], {"email": "st@example.com"}),
+        "reg": (["RiskRegister"], {"id": "RiskRegister-1", "url": "https://app.smartsheet.com/sheets/abc"}),
+    })
+    edges = EDGES + [("IS_SAME_PERSON", "u-st", "st"), ("OWNS_RAID", "st", "reg")]
+    monkeypatch.setattr(sys.modules[__name__], "NODES", nodes)
+    monkeypatch.setattr(sys.modules[__name__], "EDGES", edges)
+    rel_types = dict(REL_TYPES, **shape_relationship_types([
+        {"name": "OWNS_RAID", "from_types": ["Stakeholder"], "to_types": ["Risk"], "rebac_out": "propagate"},
+    ]))
+    key_map = dict(KEY_MAP, Stakeholder="email", RiskRegister="id")
+    scope = asyncio.run(compute_scope(GraphSession(), ("BS_user", "st@example.com"), rel_types, key_map))
+    assert scope.full == {"Stakeholder": {"st@example.com"}, "RiskRegister": {"RiskRegister-1"}}

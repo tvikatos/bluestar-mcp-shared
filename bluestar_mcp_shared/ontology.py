@@ -11,8 +11,8 @@ can read just the first FROM or TO it finds.
         "cardinality": "ONE" | "MANY" | None,
         "required": bool,
         "global_required": bool,     # (:Ontology)-[:HAS_RELATIONSHIP]->(rt)
-        "from_types": set[str],      # every (rt)-[:FROM]->(:NodeType)
-        "to_types": set[str],        # every (rt)-[:TO]->(:NodeType)
+        "from_types": set[str],      # every (rt)-[:FROM]->(:NodeType|:ExternalDataType)
+        "to_types": set[str],        # every (rt)-[:TO]->(:NodeType|:ExternalDataType)
         "properties": {name: {name, type, required, enum_values}},
         "rebac_out": "propagate" | "reference" | "none",   # default "propagate"
         "rebac_in": "propagate" | "reference" | "none",    # default "none"
@@ -28,6 +28,9 @@ can read just the first FROM or TO it finds.
 - format_types: an endpoint set for error messages
 - build_rebac_filters: the APOC relationship filters for ReBAC's two-tier
   scope walk (Task 119), the one place they are built
+- ExternalDataType (Task 136): load_external_data_types, is_collection /
+  is_collection_of (used by allows_from / allows_to), the built-in instance
+  properties and external_data_bundle
 """
 import logging
 
@@ -44,12 +47,12 @@ CALL {
     MATCH (o)-[:CONTAINS]->(rt:RelationshipType)
     CALL {
         WITH rt
-        OPTIONAL MATCH (rt)-[:FROM]->(f:NodeType)
+        OPTIONAL MATCH (rt)-[:FROM]->(f) WHERE f:NodeType OR f:ExternalDataType
         RETURN collect(DISTINCT f.name) AS from_types
     }
     CALL {
         WITH rt
-        OPTIONAL MATCH (rt)-[:TO]->(t:NodeType)
+        OPTIONAL MATCH (rt)-[:TO]->(t) WHERE t:NodeType OR t:ExternalDataType
         RETURN collect(DISTINCT t.name) AS to_types
     }
     CALL {
@@ -112,21 +115,152 @@ class RelationshipType(dict):
     own (no FROM/TO pairings).
     """
 
-    def allows_from(self, label: str) -> bool:
+    def allows_from(self, label: str, external_data_types: dict | None = None) -> bool:
         """
         Whether a relationship of this type may start at `label`. An empty
         from_types allows any label: an ontology-level (HAS_RELATIONSHIP)
-        type needs no FROM edge.
+        type needs no FROM edge. Task 136: an ExternalDataType that is a
+        collection of an allowed type is allowed too (pass the loaded
+        external_data_types).
         """
-        return not self["from_types"] or label in self["from_types"]
+        return not self["from_types"] or _allowed(label, self["from_types"], external_data_types)
 
-    def allows_to(self, label: str) -> bool:
+    def allows_to(self, label: str, external_data_types: dict | None = None) -> bool:
         """
-        Whether a relationship of this type may end at `label`. Unlike FROM,
-        an empty to_types allows nothing: a RelationshipType with no TO edge
-        is a broken definition (validate_ontology reports it).
+        Whether a relationship of this type may end at `label`, or at a
+        collection of an allowed type. Unlike FROM, an empty to_types allows
+        nothing: a RelationshipType with no TO edge is a broken definition
+        (validate_ontology reports it).
         """
-        return label in self["to_types"]
+        return _allowed(label, self["to_types"], external_data_types)
+
+
+def _allowed(label: str, types, external_data_types: dict | None) -> bool:
+    return label in types or any(is_collection_of(label, t, external_data_types) for t in types)
+
+
+# ---- Task 136: ExternalDataType ----
+#
+# An ExternalDataType (e.g. RiskRegister) points at a user's own sheet: the KG
+# holds a pointer node plus its semantics, and the agent reads the sheet live.
+# Like DocType it is a standalone Ontology-db definition (not CONTAINS'd by an
+# Ontology), never instantiated itself; KG nodes carry its name as their label.
+# (:ExternalDataType)-[:IS_COLLECTION_OF]->(:NodeType): an instance stands in
+# for those NodeTypes at either end of their RelationshipTypes, without their
+# cardinality or required rules.
+#
+#     {"name": str, "description": str | None, "policy": str | None,
+#      "collection_of": set[str]}
+
+EXTERNAL_DATA_TYPES_QUERY = """
+MATCH (et:ExternalDataType)
+OPTIONAL MATCH (et)-[:IS_COLLECTION_OF]->(nt:NodeType)
+RETURN et.name AS name, et.description AS description, et.policy AS policy,
+       collect(DISTINCT nt.name) AS collection_of
+"""
+
+
+def shape_external_data_types(rows) -> dict[str, dict]:
+    """EXTERNAL_DATA_TYPES_QUERY rows -> {name: definition}."""
+    return {
+        row["name"]: {
+            "name": row["name"],
+            "description": row.get("description"),
+            "policy": row.get("policy"),
+            "collection_of": {n for n in (row.get("collection_of") or []) if n is not None},
+        }
+        for row in (rows or []) if row.get("name") is not None
+    }
+
+
+async def load_external_data_types(driver, database: str) -> dict[str, dict]:
+    """Every ExternalDataType in the Ontology-db, as {name: definition} (with retry)."""
+    async def _read():
+        async with driver.session(database=database) as session:
+            result = await session.run(EXTERNAL_DATA_TYPES_QUERY)
+            return await result.data()
+
+    return shape_external_data_types(await with_retry(_read))
+
+
+def is_collection(label: str, external_data_types: dict | None) -> bool:
+    """Whether `label` is an ExternalDataType — a collection, so cardinality and
+    required relationship rules don't apply to its instances."""
+    return bool(external_data_types) and label in external_data_types
+
+
+def is_collection_of(label: str, node_type: str, external_data_types: dict | None) -> bool:
+    """Whether `label` is an ExternalDataType that IS_COLLECTION_OF `node_type`."""
+    return is_collection(label, external_data_types) and node_type in external_data_types[label]["collection_of"]
+
+
+# Built-in properties of every ExternalDataType instance (no per-type
+# PropertyDefs in v1), in the same shape as an ontology bundle's prop_defs, so
+# the usual property checks and coercion apply unchanged.
+EXTERNAL_DATA_KEY_PROP = "id"
+
+
+def _built_in(name, type_, required=False, is_key=False, generated=False):
+    return {"name": name, "type": type_, "is_key": is_key, "generated": generated,
+            "required": required, "enum_values": None, "default_value": None}
+
+
+EXTERNAL_DATA_PROP_DEFS = {
+    "id": _built_in("id", "STRING", required=True, is_key=True, generated=True),
+    "url": _built_in("url", "STRING", required=True),
+    "description": _built_in("description", "STRING"),
+    "read_rules": _built_in("read_rules", "STRING"),
+    "last_scanned_at": _built_in("last_scanned_at", "DATETIME"),
+}
+
+
+def external_data_url_error(prop_name: str, value) -> str | None:
+    """An instance's url must be an http(s) URL (no host check in v1); the error, or None."""
+    if isinstance(value, str) and value.strip().lower().startswith(("http://", "https://")) \
+            and len(value.strip()) > len("https://"):
+        return None
+    return f"Property '{prop_name}' must be an http(s) URL, got {type(value).__name__} ('{value}')"
+
+
+def check_external_data_properties(properties: dict) -> str | None:
+    """
+    The built-in property checks for an ExternalDataType instance's incoming
+    values: declared types (coercing in place, e.g. a last_scanned_at ISO
+    string to an aware UTC datetime, via the shared property_types rules) and
+    an http(s) url. Required and unknown properties are the caller's usual
+    bundle checks against EXTERNAL_DATA_PROP_DEFS. Returns the first error,
+    or None.
+    """
+    from .property_types import coerce_and_check_property_types
+
+    error = coerce_and_check_property_types(properties, EXTERNAL_DATA_PROP_DEFS)
+    if error:
+        return error
+    if properties.get("url") is not None:
+        return external_data_url_error("url", properties["url"])
+    return None
+
+
+def external_data_bundle(external_data_type: dict, rel_types: dict) -> dict:
+    """
+    An ontology-bundle-shaped definition for an ExternalDataType label, so a
+    server's write path can treat its instances like any node: the built-in
+    prop_defs, a generated `id` key, no lifecycle, and the ontology's
+    RelationshipTypes (endpoint checks go through allows_from / allows_to with
+    the external data types).
+    """
+    return {
+        "node_type_exists": True,
+        "is_external_data_type": True,
+        "external_data_type": external_data_type,
+        "prop_defs": {name: dict(pd) for name, pd in EXTERNAL_DATA_PROP_DEFS.items()},
+        "key_prop": EXTERNAL_DATA_KEY_PROP,
+        "generated_key": True,
+        "lifecycle_id": None,
+        "states": [],
+        "transitions": [],
+        "rel_types": rel_types,
+    }
 
 
 def shape_relationship_type(row: dict) -> RelationshipType:
